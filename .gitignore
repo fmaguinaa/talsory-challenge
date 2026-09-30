@@ -40,3 +40,6 @@ Thumbs.db
 
 # Claves de desarrollo generadas por scripts/gen-dev-keys.sh
 .env.dev-keys
+
+# Generado por `expo export`
+apps/mobile/dist/

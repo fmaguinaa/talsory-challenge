@@ -227,12 +227,11 @@ services:
     # any backend and no need for one.
     networks: [edge]
     read_only: true
+    # nginx-unprivileged keeps its pid and its temporary files under /tmp, and
+    # the entrypoint script renders the runtime config there too, so this single
+    # tmpfs is the only writable path the container needs.
     tmpfs:
       - /tmp:size=16m,mode=1777
-      - /var/cache/nginx:size=16m,mode=0755
-      # nginx needs writable paths for its pid and its own temporary files even
-      # with a read-only root filesystem.
-      - /var/run:size=4m,mode=0755
     security_opt:
       - no-new-privileges:true
     cap_drop:

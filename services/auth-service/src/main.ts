@@ -20,11 +20,14 @@ import { loadConfig } from './config';
 async function main(): Promise<void> {
   const config = loadConfig();
 
+  // Pretty-printing is an explicit opt-in because pino-pretty is a
+  // devDependency and is deliberately absent from the runtime image; inferring
+  // it from the log level would make a debug run of a production image fail to
+  // boot for no good reason.
+  const pretty = process.env.LOG_PRETTY === 'true';
   const logger = pino({
     level: config.logLevel,
-    ...(config.logLevel === 'debug'
-      ? { transport: { target: 'pino-pretty', options: { colorize: true } } }
-      : {}),
+    ...(pretty ? { transport: { target: 'pino-pretty', options: { colorize: true } } } : {}),
   });
 
   // Fail fast and loudly rather than at the first login: an unparseable key

@@ -17,14 +17,15 @@ import { loadConfig } from './config';
 async function main(): Promise<void> {
   const config = loadConfig();
 
+  // Structured JSON on stdout, which is what a container runtime collects.
+  // Pretty-printing is an explicit opt-in because pino-pretty is a
+  // devDependency and is deliberately absent from the runtime image; inferring
+  // it from the log level would make a debug run of a production image fail to
+  // boot for no good reason.
+  const pretty = process.env.LOG_PRETTY === 'true';
   const logger = pino({
     level: config.logLevel,
-    // Structured JSON on stdout, which is what a container runtime collects.
-    // In development pino-pretty makes the output readable; the check is on the
-    // log level because that is the one signal available before anything else.
-    ...(config.logLevel === 'debug'
-      ? { transport: { target: 'pino-pretty', options: { colorize: true } } }
-      : {}),
+    ...(pretty ? { transport: { target: 'pino-pretty', options: { colorize: true } } } : {}),
   });
 
   const validator = new HttpTokenValidator({

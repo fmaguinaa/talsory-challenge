@@ -17,6 +17,10 @@ services:
     ports:
       - '${DEV_AUTH_PORT:-4000}:4000'
     environment:
+      # Debug level, still as JSON. Pretty-printing is deliberately NOT enabled
+      # here: pino-pretty is a devDependency and is not in the runtime image, so
+      # asking a container for it makes the service fail to boot. It is meant for
+      # `npm run dev` on the host, where a human is reading the terminal.
       LOG_LEVEL: debug
 
   qr-api:
