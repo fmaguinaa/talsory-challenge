@@ -12,7 +12,9 @@ servers:
 
 tags:
   - name: auth
+    description: "Authentication: credentials in, bearer tokens out."
   - name: health
+    description: Liveness and readiness probes. Public and dependency-free by design.
 
 paths:
   /auth/login:
@@ -20,6 +22,8 @@ paths:
       tags: [auth]
       summary: Exchange credentials for an access token
       operationId: login
+      # No bearer token: this is where the caller obtains one.
+      security: []
       requestBody:
         required: true
         content:
@@ -97,6 +101,9 @@ paths:
     get:
       tags: [auth]
       summary: Public keys (JWKS) for local RS256 verification
+      # Public by design: a probe cannot hold a bearer token, and the
+      # published keys are meant to be fetched by anyone.
+      security: []
       operationId: getJwks
       responses:
         '200':
@@ -116,6 +123,9 @@ paths:
     get:
       tags: [health]
       summary: Liveness probe
+      # Public by design: a probe cannot hold a bearer token, and the
+      # published keys are meant to be fetched by anyone.
+      security: []
       operationId: healthLive
       responses:
         '200':
@@ -129,6 +139,9 @@ paths:
     get:
       tags: [health]
       summary: Readiness probe
+      # Public by design: a probe cannot hold a bearer token, and the
+      # published keys are meant to be fetched by anyone.
+      security: []
       operationId: healthReady
       responses:
         '200':

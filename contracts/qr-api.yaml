@@ -12,7 +12,9 @@ servers:
 
 tags:
   - name: qr
+    description: QR factorization of a rectangular matrix.
   - name: health
+    description: Liveness and readiness probes. Public and dependency-free by design.
 
 paths:
   /api/v1/qr/factorize:
@@ -56,6 +58,9 @@ paths:
     get:
       tags: [health]
       summary: Liveness probe
+      # Public by design: a probe cannot hold a bearer token, and the
+      # published keys are meant to be fetched by anyone.
+      security: []
       operationId: healthLive
       responses:
         '200':
@@ -65,6 +70,9 @@ paths:
     get:
       tags: [health]
       summary: Readiness probe
+      # Public by design: a probe cannot hold a bearer token, and the
+      # published keys are meant to be fetched by anyone.
+      security: []
       operationId: healthReady
       responses:
         '200':

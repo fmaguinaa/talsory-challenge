@@ -1,0 +1,228 @@
+# =============================================================================
+# Continuous integration.
+#
+# Shape: one matrix job per service (lint -> test), then a compose job that
+# builds every image and runs the smoke test against the real stack.
+#
+# The compose job is not optional. Two of the bugs this repository found (an
+# introspection client that never forwarded the Authorization header, and a
+# downstream error classified by an `instanceof` that was false) were invisible
+# to every unit test and only appeared when the services talked to each other
+# for real. A pipeline that stops at "unit tests pass" would have shipped both.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push supersedes an in-flight run on the same ref. Saves minutes on a
+# branch with frequent pushes and prevents two runs from racing for the registry.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned here so every job agrees. Node 24 is the current LTS.
+  NODE_VERSION: '24'
+  GO_VERSION: '1.23'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Per-service gates
+  # ---------------------------------------------------------------------------
+  services:
+    name: ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One failing service should not hide the state of the others.
+      fail-fast: false
+      matrix:
+        include:
+          - service: qr-api
+            kind: go
+          - service: stats-api
+            kind: node
+          - service: auth-service
+            kind: node
+          - service: orchestrator
+            kind: node
+          - service: mobile
+            kind: node
+    defaults:
+      run:
+        working-directory: ${{ matrix.service == 'mobile' && 'apps/mobile' || format('services/{0}', matrix.service) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        if: matrix.kind == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          # Caching the module download and build cache removes the slowest part
+          # of a Go job without any risk of a stale artifact.
+          cache-dependency-path: services/qr-api/go.sum
+
+      - name: Set up Node
+        if: matrix.kind == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.service == 'mobile' && 'apps/mobile/package-lock.json' || format('services/{0}/package-lock.json', matrix.service) }}
+
+      # -------------------------------------------------------------------------
+      # Go
+      # -------------------------------------------------------------------------
+      - name: gofmt check
+        if: matrix.kind == 'go'
+        run: |
+          # Formatting is checked rather than applied: a pipeline that rewrites
+          # code hides the fact that it was not formatted to begin with.
+          unformatted="$(gofmt -l .)"
+          if [ -n "${unformatted}" ]; then
+            echo "::error::these files are not gofmt-formatted:"
+            echo "${unformatted}"
+            exit 1
+          fi
+
+      - name: go vet
+        if: matrix.kind == 'go'
+        run: go vet ./...
+
+      - name: go test
+        if: matrix.kind == 'go'
+        # -race is not optional: the introspection cache and the server's request
+        # handling are both shared mutable state.
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: go build
+        if: matrix.kind == 'go'
+        run: go build -trimpath -ldflags="-s -w" -o /tmp/qr-api ./cmd/qr-api
+
+      # -------------------------------------------------------------------------
+      # Node
+      # -------------------------------------------------------------------------
+      - name: install dependencies
+        if: matrix.kind == 'node'
+        run: npm ci
+
+      - name: typecheck
+        if: matrix.kind == 'node'
+        run: npm run typecheck
+
+      - name: lint
+        if: matrix.kind == 'node'
+        run: npm run lint
+
+      - name: test
+        if: matrix.kind == 'node'
+        run: npm test
+
+      - name: build
+        if: matrix.kind == 'node'
+        run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # Contract check
+  # ---------------------------------------------------------------------------
+  contracts:
+    name: contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: validate the OpenAPI documents
+        # A specification that does not parse is worse than no specification:
+        # it looks authoritative while being unreadable by any tooling.
+        run: |
+          npx --yes @redocly/cli@latest lint contracts/*.yaml --extends=minimal --skip-rule=no-server-example.com
+
+  # ---------------------------------------------------------------------------
+  # The whole stack
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: end-to-end
+    runs-on: ubuntu-latest
+    needs: [services, contracts]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: generate development keys
+        # The RSA pair and the argon2 hash, created per run so no key material
+        # is ever stored. The npm dependency is installed because the script
+        # hashes the demo password through Node.
+        run: |
+          npm ci --prefix services/auth-service
+          ./scripts/gen-dev-keys.sh
+
+      - name: build the images
+        run: |
+          cp .env.example .env
+          cat .env.dev-keys >> .env
+          docker compose build
+
+      - name: start the stack
+        # --wait blocks until every container reports healthy, so the smoke
+        # test never races a container that is still booting.
+        run: docker compose up -d --wait
+
+      - name: smoke test
+        # Fails the job on the first failed assertion, and the script prints
+        # what failed and why, so the log is the diagnosis.
+        run: ./scripts/smoke.sh
+
+      - name: container logs on failure
+        if: failure()
+        # Without this a failing run is a single red X with no evidence.
+        run: docker compose logs --no-color --tail=200
+
+      - name: shut down
+        if: always()
+        run: docker compose down --remove-orphans
+
+  # ---------------------------------------------------------------------------
+  # Cloud deployment, on demand
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: deploy to Azure Container Apps
+    # Manual only. A deploy is never triggered by a merge.
+    if: github.event_name == 'workflow_dispatch'
+    needs: [smoke]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write # OIDC, so no long-lived cloud credentials in the repo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: build and push the images
+        uses: azure/login@v2
+        with:
+          # ACR's own OIDC token, so the registry needs no stored password.
+          outputs: >-
+            outputs=${{ steps.acr.outputs }}
+        id: acr
+
+      - name: provision or update the infrastructure
+        run: az deployment group create --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" --template-file deploy/main.bicep --parameters deploy/main.parameters.json
+
+      - name: deploy the container apps
+        run: az containerapp update --name orchestrator --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" --image "${{ vars.ACR_LOGIN_SERVER }}/orchestrator:${{ github.sha }}"
