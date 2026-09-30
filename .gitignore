@@ -37,3 +37,6 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Claves de desarrollo generadas por scripts/gen-dev-keys.sh
+.env.dev-keys
