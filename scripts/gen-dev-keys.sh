@@ -53,9 +53,22 @@ openssl pkey \
 log "hashing the demo password with argon2id"
 # The hash is produced through Node because argon2 is a native module: shelling
 # out to a separate argon2 CLI would add a dependency the project does not have.
-# AUTH_USERS is passed on stdin so the password never appears in the process
-# table.
-NODE_HASH="$(cd "${REPO_ROOT}/services/auth-service" && DEMO_PASSWORD="${DEMO_PASSWORD}" node -e '
+#
+# argon2 is installed here on demand. The documented quick start is
+# `cp .env.example .env && ./scripts/gen-dev-keys.sh && docker compose up`, and
+# asking the developer to remember an extra `npm ci` between the two steps is
+# how a quick start stops being a quick start. The password is passed through
+# the environment rather than on the command line, so it never appears in the
+# process table.
+cd "${REPO_ROOT}/services/auth-service"
+
+if ! node -e 'require.resolve("argon2")' >/dev/null 2>&1; then
+  log "argon2 is not installed; installing dependencies for auth-service"
+  command -v npm >/dev/null 2>&1 || die "npm is required to install argon2 but was not found in PATH"
+  npm ci --silent
+fi
+
+NODE_HASH="$(DEMO_PASSWORD="${DEMO_PASSWORD}" node -e '
 const argon2 = require("argon2");
 const password = process.env.DEMO_PASSWORD;
 if (!password) {
@@ -74,7 +87,7 @@ argon2
     process.stderr.write(`${error.message}\n`);
     process.exit(1);
   });
-')" || die "failed to hash the demo password (did you run npm install in services/auth-service?)"
+')" || die "failed to hash the demo password"
 
 [[ -n "${NODE_HASH}" ]] || die "argon2 produced an empty hash"
 
