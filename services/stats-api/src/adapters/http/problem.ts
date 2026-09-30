@@ -19,6 +19,9 @@ export const ProblemCategory = {
   Unauthorized: 'unauthorized',
   PayloadTooLarge: 'payload-too-large',
   ServiceUnavailable: 'service-unavailable',
+  // Declared for parity across the four services. A client switching on `type`
+  // should not find that one service uses a different vocabulary from the rest.
+  RateLimited: 'rate-limited',
   Internal: 'internal-error',
 } as const;
 

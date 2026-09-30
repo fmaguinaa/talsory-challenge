@@ -14,7 +14,7 @@ import {
 import type { StatsLimits } from '../src/application/computeStats';
 import { HttpTokenValidator } from '../src/adapters/authclient/HttpTokenValidator';
 import { buildApp } from '../src/adapters/http/router';
-import { HttpProblem } from '../src/adapters/http/problem';
+import { HttpProblem, ProblemCategory } from '../src/adapters/http/problem';
 import { PROBLEM_MEDIA_TYPE, type ProblemDetail } from '../src/adapters/http/problem';
 import { REQUEST_ID_HEADER, extractBearerToken } from '../src/adapters/http/requestContext';
 
@@ -424,11 +424,19 @@ describe('unexpected failures', () => {
    * logic. The contract is that the client gets a bare 500 with no internals,
    * and that the request does not hang.
    */
-  function appWithExplodingUseCase(error: unknown) {
-    const exploding = {
+  function appWithExplodingUseCase(error: Error) {
+    // A promise that rejects with an Error, as a real bug in the use case
+    // would surface: the rule against rejecting with a non-Error is right, and
+    // the 500 path is what this exercises.
+    const exploding: Pick<InstanceType<typeof ComputeStatsUseCase>, 'execute'> = {
       execute: () => Promise.reject(error),
-    } as unknown as InstanceType<typeof ComputeStatsUseCase>;
-    return buildApp({ useCase: exploding, logger, maxBodyBytes: 64 * 1024, limits: LIMITS });
+    };
+    return buildApp({
+      useCase: exploding as InstanceType<typeof ComputeStatsUseCase>,
+      logger,
+      maxBodyBytes: 64 * 1024,
+      limits: LIMITS,
+    });
   }
 
   it('answers a generic 500 for an unrecognised failure', async () => {
@@ -453,7 +461,7 @@ describe('unexpected failures', () => {
     // HttpProblem is how a route states an outcome it has already decided on,
     // so the error handler must pass it through with its status intact.
     const app = appWithExplodingUseCase(
-      new HttpProblem(429, 'rate-limited', 'Too many requests', 'Slow down.'),
+      new HttpProblem(429, ProblemCategory.RateLimited, 'Too many requests', 'Slow down.'),
     );
     const { status, problem } = await post(
       app,
@@ -515,11 +523,13 @@ describe('HttpTokenValidator against a real server', () => {
   let mode: 'active' | 'inactive' | 'serverError' | 'unauthorized' | 'malformed' = 'active';
   let calls = 0;
   let lastServiceKey: string | undefined;
+  let lastAuthorization: string | undefined;
 
   beforeAll(async () => {
     server = createServer((req, res) => {
       calls += 1;
       lastServiceKey = req.headers['x-service-key'] as string | undefined;
+      lastAuthorization = req.headers.authorization;
       res.setHeader('Content-Type', 'application/json');
 
       switch (mode) {
@@ -556,6 +566,8 @@ describe('HttpTokenValidator against a real server', () => {
   afterEach(() => {
     mode = 'active';
     calls = 0;
+    lastServiceKey = undefined;
+    lastAuthorization = undefined;
   });
 
   /** Builds a validator with caching disabled unless a TTL is given. */
@@ -569,6 +581,14 @@ describe('HttpTokenValidator against a real server', () => {
   it('sends the service credential', async () => {
     await validatorWith().validate('token');
     expect(lastServiceKey).toBe('service-key');
+  });
+
+  // Regression guard for the single most important line in the adapter. Without
+  // the Authorization header the authority receives no credential, answers
+  // {"active": false}, and every valid token looks revoked.
+  it('forwards the token under inspection', async () => {
+    await validatorWith().validate('header.payload.signature');
+    expect(lastAuthorization).toBe('Bearer header.payload.signature');
   });
 
   it('reports an inactive token as inactive', async () => {
@@ -621,51 +641,66 @@ describe('HttpTokenValidator against a real server', () => {
   });
 
   it('reports an empty token as inactive without calling the authority', async () => {
+    const baseline = calls;
     expect(await validatorWith().validate('   ')).toBe('inactive');
-    expect(calls).toBe(0);
+    expect(calls - baseline).toBe(0);
   });
 
   it('caches a positive answer', async () => {
+    const baseline = calls;
     const validator = validatorWith(60);
     await validator.validate('token');
     await validator.validate('token');
     await validator.validate('token');
-    expect(calls).toBe(1);
+    expect(calls - baseline).toBe(1);
   });
 
   it('keys the cache per token', async () => {
+    const baseline = calls;
     const validator = validatorWith(60);
     await validator.validate('a');
     await validator.validate('b');
     await validator.validate('a');
-    expect(calls).toBe(2);
+    // Two distinct tokens, two lookups; the repeat of 'a' is served from cache.
+    expect(calls - baseline).toBe(2);
   });
 
   it('never caches a negative answer', async () => {
+    const baseline = calls;
     mode = 'inactive';
     const validator = validatorWith(60);
     await validator.validate('token');
     await validator.validate('token');
-    expect(calls).toBe(2);
+    expect(calls - baseline).toBe(2);
   });
 
   it('does not cache when the TTL is zero', async () => {
+    const baseline = calls;
     const validator = validatorWith(0);
     await validator.validate('token');
     await validator.validate('token');
-    expect(calls).toBe(2);
+    expect(calls - baseline).toBe(2);
   });
 
   it('expires a cache entry once the TTL elapses', async () => {
+    // The counter is shared with the rest of this describe block and an
+    // in-flight request from an earlier test can still land, so the assertions
+    // are relative to a baseline taken here rather than absolute.
+    const baseline = calls;
     const validator = validatorWith(1);
+
     await validator.validate('token');
     await validator.validate('token');
-    expect(calls).toBe(1);
-    // The entry lives for a full second; waiting for it to lapse keeps the
-    // test honest about the actual TTL rather than a stubbed clock.
+    // Two validations, one network call: the second was served from cache.
+    expect(calls - baseline).toBe(1);
+
+    // Waiting for the real TTL keeps the test honest about the actual lifetime
+    // rather than a stubbed clock.
     await new Promise((resolve) => setTimeout(resolve, 1100));
     await validator.validate('token');
-    expect(calls).toBe(2);
+
+    // The entry is gone, so the authority is consulted again.
+    expect(calls - baseline).toBe(2);
   });
 
   it('does not let an entry outlive the token it describes', async () => {

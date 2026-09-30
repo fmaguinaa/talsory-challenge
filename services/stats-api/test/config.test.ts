@@ -40,7 +40,7 @@ describe('loadConfig', () => {
       if (snapshot[key] === undefined) {
         delete process.env[key];
       } else {
-        process.env[key] = snapshot[key] as string;
+        process.env[key] = snapshot[key];
       }
     }
   });

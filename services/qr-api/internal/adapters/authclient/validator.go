@@ -138,6 +138,12 @@ func (v *Validator) Validate(ctx context.Context, token string) error {
 	if err != nil {
 		return fmt.Errorf("%w: building introspection request: %v", application.ErrAuthUnavailable, err)
 	}
+	// The token under inspection travels in the Authorization header. Without it
+	// auth-service sees no credential at all and answers {"active": false}, which
+	// the caller then reports as a 401 for a perfectly valid token.
+	req.Header.Set("Authorization", "Bearer "+token)
+	// The service credential is what authorises the *introspection call*; it is
+	// separate from the token being introspected.
 	req.Header.Set("X-Service-Key", v.serviceKey)
 	req.Header.Set("Accept", "application/json")
 

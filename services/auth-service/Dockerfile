@@ -31,8 +31,12 @@ COPY package.json package-lock.json ./
 # --omit=dev keeps vitest, typescript and the whole toolchain out of the runtime
 # image. `npm ci` is used rather than `npm install` so the lockfile is honoured
 # exactly, making the build reproducible.
+# The npm cache is a shared build cache, not a runtime artefact, so it is mounted
+# rather than baked in. `npm cache clean` is deliberately NOT run: the cache is
+# shared across concurrently building services, and clearing it there makes the
+# builds race each other.
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci --omit=dev && npm cache clean --force
+    npm ci --omit=dev
 
 FROM node:22-alpine AS runtime
 WORKDIR /app

@@ -1,5 +1,5 @@
 import type { HttpService } from '@nestjs/axios';
-import { AxiosError, type AxiosInstance, type AxiosRequestConfig } from 'axios';
+import type { AxiosInstance, AxiosRequestConfig } from 'axios';
 
 import { WorkflowError, type WorkflowErrorKind } from '../matrix/application/AnalyzeWorkflow';
 
@@ -55,6 +55,38 @@ export function buildRequestConfig(options: DownstreamOptions): AxiosRequestConf
   };
 }
 
+/**
+ * The shape of an HTTP failure, described structurally rather than by class.
+ *
+ * `instanceof AxiosError` is deliberately avoided. @nestjs/axios can resolve an
+ * axios instance from its own dependency tree, and an error thrown by that copy
+ * is not an instance of the `AxiosError` class imported here -- the check then
+ * silently fails, every failure looks like "no response", and a plain 401 is
+ * reported to the client as an unreachable dependency. Duck-typing on
+ * `isAxiosError`, which axios sets on its own errors precisely so this works,
+ * is immune to that.
+ */
+interface HttpFailure {
+  /** Set by axios on every error it produces. */
+  readonly isAxiosError: true;
+  /** Machine-readable failure code, e.g. ECONNABORTED or ERR_BAD_REQUEST. */
+  readonly code?: string;
+  /** Present when the server actually answered. */
+  readonly response?: {
+    readonly status: number;
+    readonly data: unknown;
+  };
+}
+
+/** Reports whether an unknown value is an axios failure. */
+export function isHttpFailure(error: unknown): error is HttpFailure {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { isAxiosError?: unknown }).isAxiosError === true
+  );
+}
+
 /** How long to wait before the given attempt (0-based). */
 export function backoffFor(attempt: number, baseMs: number): number {
   return baseMs * 2 ** attempt;
@@ -74,7 +106,7 @@ export function backoffFor(attempt: number, baseMs: number): number {
  * - Everything else is a downstream failure or a timeout.
  */
 export function classifyAxiosError(error: unknown, serviceName: string): DownstreamError {
-  if (!(error instanceof AxiosError)) {
+  if (!isHttpFailure(error)) {
     return new DownstreamError(
       'downstream-failure',
       undefined,
@@ -248,7 +280,7 @@ export function toWorkflowError(error: unknown, serviceName: string): WorkflowEr
  * neither help nor heal.
  */
 export function isRetryable(error: unknown): boolean {
-  if (!(error instanceof AxiosError)) return false;
+  if (!isHttpFailure(error)) return false;
   if (error.response) {
     const status = error.response.status;
     return status >= 500 && status !== 501;

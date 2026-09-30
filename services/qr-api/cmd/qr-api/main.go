@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -22,13 +24,66 @@ import (
 	"github.com/interseguro/qr-api/internal/config"
 )
 
+// healthcheckFlag makes the binary usable as its own container health probe.
+const healthcheckFlag = "-healthcheck"
+
 func main() {
+	// The runtime image is distroless/static: no shell, no wget, no curl. The
+	// probe therefore has to live inside the binary. Container runtimes call the
+	// healthcheck command with no network namespace of their own, so this
+	// performs a real request against the running server.
+	if len(os.Args) > 1 && os.Args[1] == healthcheckFlag {
+		os.Exit(runHealthcheck())
+	}
+
 	if err := run(); err != nil {
 		// The logger may not exist yet if configuration failed, so this one
 		// message goes to stderr in the standard library's plain format.
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runHealthcheck probes the local readiness endpoint and returns the process
+// exit code: 0 when the service is ready, 1 otherwise.
+//
+// The probe is deliberately read-only and dependency-free, matching the
+// endpoint it calls. A probe that consulted auth-service would let a slow
+// authority make this container look unhealthy, and the orchestrator would then
+// restart a service that is working perfectly.
+func runHealthcheck() int {
+	const probeTimeout = 2 * time.Second
+
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+
+	addr := os.Getenv("QR_ADDR")
+	if addr == "" {
+		addr = "0.0.0.0:8081"
+	}
+	// 0.0.0.0 is not a valid destination; the probe needs the loopback address
+	// that the server is also listening on.
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 1
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort(host, port)+"/health/ready", nil)
+	if err != nil {
+		return 1
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 1
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Anything other than 200 means not ready. The body is not inspected: the
+	// endpoint has one meaning, and parsing it would add a failure mode.
+	return map[bool]int{true: 0, false: 1}[resp.StatusCode == http.StatusOK]
 }
 
 // run wires and runs the service, returning an error instead of exiting so

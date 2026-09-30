@@ -24,6 +24,8 @@ type introspectionSpy struct {
 	calls atomic.Int64
 	// serviceKeys records the X-Service-Key header of every call.
 	serviceKeys chan string
+	// authorizations records the Authorization header of every call.
+	authorizations chan string
 	// reply produces the response for the nth call, keyed by a mode below.
 	mode atomic.Int32
 }
@@ -45,11 +47,15 @@ const (
 // newSpy starts a fake authority. Callers must Close it.
 func newSpy(t *testing.T) *introspectionSpy {
 	t.Helper()
-	s := &introspectionSpy{serviceKeys: make(chan string, 64)}
+	s := &introspectionSpy{serviceKeys: make(chan string, 64), authorizations: make(chan string, 64)}
 	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.calls.Add(1)
 		select {
 		case s.serviceKeys <- r.Header.Get("X-Service-Key"):
+		default:
+		}
+		select {
+		case s.authorizations <- r.Header.Get("Authorization"):
 		default:
 		}
 		if r.URL.Path != "/auth/validate" {
@@ -120,6 +126,30 @@ func TestValidateSendsTheServiceCredential(t *testing.T) {
 	case key := <-spy.serviceKeys:
 		if key != "unit-service-key" {
 			t.Errorf("X-Service-Key = %q, want %q", key, "unit-service-key")
+		}
+	default:
+		t.Fatal("the authority recorded no call")
+	}
+}
+
+// TestValidateForwardsTheTokenUnderInspection pins the single most important
+// line in this file. Without the Authorization header the authority sees no
+// credential, answers {"active": false}, and every valid token is reported as
+// invalid -- a failure that looks like an authentication bug and is not one.
+func TestValidateForwardsTheTokenUnderInspection(t *testing.T) {
+	t.Parallel()
+
+	spy := newSpy(t)
+	v := newValidator(t, spy.URL(), 0)
+
+	if err := v.Validate(context.Background(), "header.payload.signature"); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	select {
+	case got := <-spy.authorizations:
+		if want := "Bearer header.payload.signature"; got != want {
+			t.Errorf("Authorization = %q, want %q", got, want)
 		}
 	default:
 		t.Fatal("the authority recorded no call")

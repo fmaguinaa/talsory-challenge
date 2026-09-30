@@ -1,0 +1,266 @@
+# =============================================================================
+# Interseguro - interseguro full stack
+#
+# Two networks, and the split is the security model rather than a convenience:
+#
+#   edge     - mobile-web and orchestrator only. This is everything an attacker
+#              on the internet can address.
+#   internal - marked `internal: true`, so containers on it have no route off
+#              the Docker network at all. auth-service, qr-api and stats-api live
+#              here and nothing outside can reach them, not even from the host.
+#
+# ONLY orchestrator and mobile-web publish a host port. Every other service is
+# reachable only from another container, which is why the smoke test can assert
+# that their ports are closed from the host.
+# =============================================================================
+
+name: interseguro
+
+x-node-service: &node-service
+  restart: unless-stopped
+  # `init` is intentionally NOT set: the Node images already run under tini as
+  # PID 1 (so that SIGTERM reaches the process), and enabling Docker's tini too
+  # nests the two and produces a subreaper warning on every start.
+  networks: [internal]
+  # Containers run unprivileged with every capability dropped, and the root
+  # filesystem is read-only: a process escape has nowhere to write.
+  read_only: true
+  tmpfs:
+    - /tmp:size=32m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: '10m'
+      max-file: '3'
+
+x-service-healthcheck: &service-healthcheck
+  interval: 10s
+  timeout: 3s
+  retries: 5
+  start_period: 20s
+
+services:
+  # ---------------------------------------------------------------------------
+  # auth-service: issues and introspects JWTs. Internal only.
+  # ---------------------------------------------------------------------------
+  auth-service:
+    <<: *node-service
+    # auth-service is the only service that receives the signing key pair, and
+    # the only one that receives the demo password hash. Every other container
+    # gets just SERVICE_API_KEYS: leaking the private key into qr-api would
+    # mean anyone who can read one container's environment can mint tokens.
+    #
+    # Secrets arrive through env_file rather than `environment:` because
+    # Compose interpolates ${...} inside `environment` values, and an argon2id
+    # hash or a PEM body is full of `$` characters that would be silently
+    # eaten. env_file values are passed through verbatim.
+    #
+    # gen-dev-keys.sh writes this file; see the README quick start.
+    env_file:
+      - path: .env.dev-keys
+        required: true
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      AUTH_PORT: 4000
+      # The key pair, the kid and the demo credentials arrive from
+      # .env.dev-keys via env_file, verbatim and uninterpolated.
+      JWT_TTL_SECONDS: ${JWT_TTL_SECONDS:-900}
+      JWT_ISSUER: ${JWT_ISSUER:-https://interseguro.local/auth}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-interseguro-api}
+      # DEMO_USERNAME and DEMO_PASSWORD_HASH come from .env.dev-keys.
+      # SERVICE_API_KEYS is the credential backends present to this service; it
+      # lives in .env rather than the secrets file because it is not key material.
+      SERVICE_API_KEYS: ${SERVICE_API_KEYS:?SERVICE_API_KEYS is required}
+      AUTH_USERS: ${AUTH_USERS:-}
+      LOGIN_RATE_LIMIT_WINDOW_MS: ${LOGIN_RATE_LIMIT_WINDOW_MS:-60000}
+      LOGIN_RATE_LIMIT_MAX: ${LOGIN_RATE_LIMIT_MAX:-20}
+    healthcheck:
+      <<: *service-healthcheck
+      # node:alpine ships wget, so no curl has to be installed into the image
+      # just to answer a probe.
+      test: ['CMD', 'wget', '--spider', '-q', 'http://127.0.0.1:4000/health/ready']
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+        reservations:
+          cpus: '0.10'
+          memory: 128M
+
+  # ---------------------------------------------------------------------------
+  # qr-api: QR factorization (Go + Fiber). Internal only.
+  # ---------------------------------------------------------------------------
+  qr-api:
+    <<: *node-service
+    build:
+      context: ./services/qr-api
+      dockerfile: Dockerfile
+    environment:
+      QR_ADDR: 0.0.0.0:8081
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MAX_MATRIX_DIM: ${MAX_MATRIX_DIM:-100}
+      QR_MAX_BODY_BYTES: ${QR_MAX_BODY_BYTES:-1048576}
+      AUTH_SERVICE_URL: http://auth-service:4000
+      AUTH_SERVICE_KEY: ${SERVICE_API_KEYS:?SERVICE_API_KEYS is required}
+      AUTH_CACHE_TTL_SECONDS: ${AUTH_CACHE_TTL_SECONDS:-30}
+      AUTH_VALIDATE_TIMEOUT_MS: ${AUTH_VALIDATE_TIMEOUT_MS:-1500}
+      # distroless/static has no shell and no wget, so the probe is a subcommand
+      # of the binary itself (-healthcheck), not a command inside the container.
+    healthcheck:
+      <<: *service-healthcheck
+      test: ['CMD', '/usr/local/bin/qr-api', '-healthcheck']
+    deploy:
+      resources:
+        limits:
+          cpus: '1.00'
+          memory: 256M
+        reservations:
+          cpus: '0.10'
+          memory: 64M
+
+  # ---------------------------------------------------------------------------
+  # stats-api: statistics over matrices (Node + Express). Internal only.
+  # ---------------------------------------------------------------------------
+  stats-api:
+    <<: *node-service
+    build:
+      context: ./services/stats-api
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      STATS_PORT: 4001
+      MAX_MATRICES: ${MAX_MATRICES:-16}
+      MAX_TOTAL_ELEMENTS: ${MAX_TOTAL_ELEMENTS:-20000}
+      MAX_MATRIX_DIM: ${MAX_MATRIX_DIM:-100}
+      STATS_MAX_BODY_BYTES: ${STATS_MAX_BODY_BYTES:-1048576}
+      DIAGONAL_EPSILON: ${DIAGONAL_EPSILON:-1e-9}
+      AUTH_SERVICE_URL: http://auth-service:4000
+      AUTH_SERVICE_KEY: ${SERVICE_API_KEYS:?SERVICE_API_KEYS is required}
+      AUTH_CACHE_TTL_SECONDS: ${AUTH_CACHE_TTL_SECONDS:-30}
+      AUTH_VALIDATE_TIMEOUT_MS: ${AUTH_VALIDATE_TIMEOUT_MS:-1500}
+    healthcheck:
+      <<: *service-healthcheck
+      test: ['CMD', 'wget', '--spider', '-q', 'http://127.0.0.1:4001/health/ready']
+    depends_on:
+      auth-service:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+        reservations:
+          cpus: '0.10'
+          memory: 128M
+
+  # ---------------------------------------------------------------------------
+  # orchestrator: the only public API. Talks to all three backends.
+  # ---------------------------------------------------------------------------
+  orchestrator:
+    <<: *node-service
+    build:
+      context: ./services/orchestrator
+      dockerfile: Dockerfile
+    # The single published backend port.
+    ports:
+      - '${ORCHESTRATOR_PORT:-3000}:3000'
+    # On both networks: `edge` to be reachable from the outside, `internal` to
+    # reach the backends. This is the only container with both.
+    networks: [edge, internal]
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PORT: 3000
+      AUTH_SERVICE_URL: http://auth-service:4000
+      QR_API_URL: http://qr-api:8081
+      STATS_API_URL: http://stats-api:4001
+      AUTH_SERVICE_KEY: ${SERVICE_API_KEYS:?SERVICE_API_KEYS is required}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      MAX_MATRIX_DIM: ${MAX_MATRIX_DIM:-100}
+      MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
+      DOWNSTREAM_TIMEOUT_MS: ${DOWNSTREAM_TIMEOUT_MS:-3000}
+      DOWNSTREAM_RETRIES: ${DOWNSTREAM_RETRIES:-1}
+      DOWNSTREAM_RETRY_BACKOFF_MS: ${DOWNSTREAM_RETRY_BACKOFF_MS:-100}
+      AUTH_VALIDATE_TIMEOUT_MS: ${AUTH_VALIDATE_TIMEOUT_MS:-1500}
+      THROTTLE_TTL_MS: ${THROTTLE_TTL_MS:-60000}
+      THROTTLE_LIMIT: ${THROTTLE_LIMIT:-120}
+    healthcheck:
+      <<: *service-healthcheck
+      test: ['CMD', 'wget', '--spider', '-q', 'http://127.0.0.1:3000/health/ready']
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      qr-api:
+        condition: service_healthy
+      stats-api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1.00'
+          memory: 512M
+        reservations:
+          cpus: '0.20'
+          memory: 256M
+
+  # ---------------------------------------------------------------------------
+  # mobile-web: the Expo export, served by nginx. Public.
+  # ---------------------------------------------------------------------------
+  mobile-web:
+    build:
+      context: ./apps/mobile
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # nginx-unprivileged runs its own master/worker pair and needs no init
+    # wrapper, for the same reason tini is not enabled above.
+    # Only the front is on `edge` alongside the orchestrator; it has no route to
+    # any backend and no need for one.
+    networks: [edge]
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      - /var/cache/nginx:size=16m,mode=0755
+      # nginx needs writable paths for its pid and its own temporary files even
+      # with a read-only root filesystem.
+      - /var/run:size=4m,mode=0755
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - '${MOBILE_WEB_PORT:-8080}:8080'
+    environment:
+      # Rendered into /config.json at container start, so the same image can be
+      # promoted between environments without a rebuild.
+      API_URL: ${API_URL:-http://localhost:3000}
+    healthcheck:
+      <<: *service-healthcheck
+      test: ['CMD', 'wget', '--spider', '-q', 'http://127.0.0.1:8080/']
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M
+        reservations:
+          cpus: '0.05'
+          memory: 32M
+
+networks:
+  edge:
+    driver: bridge
+  internal:
+    driver: bridge
+    # `internal: true` means containers here have no gateway: they cannot reach
+    # the internet and cannot be reached from the host. This is what makes the
+    # smoke test's "internal ports are closed" assertion a real check.
+    internal: true

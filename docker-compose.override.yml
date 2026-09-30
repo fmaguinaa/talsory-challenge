@@ -1,0 +1,43 @@
+# =============================================================================
+# Development overrides.
+#
+# Applied automatically on top of docker-compose.yml by `docker compose up`.
+# It is NOT used in any deployed environment, so everything here is safe to make
+# convenient: nothing in it may be relied on outside a developer's machine.
+#
+# Two things are relaxed: internal ports are published so a debugger or curl can
+# reach them, and the services log at debug level.
+# =============================================================================
+
+services:
+  # Internal ports become reachable from the host. This defeats the network
+  # isolation the production compose file relies on, which is exactly why the
+  # smoke test runs against the plain compose file, not this one.
+  auth-service:
+    ports:
+      - '${DEV_AUTH_PORT:-4000}:4000'
+    environment:
+      LOG_LEVEL: debug
+
+  qr-api:
+    ports:
+      - '${DEV_QR_PORT:-8081}:8081'
+    environment:
+      LOG_LEVEL: debug
+
+  stats-api:
+    ports:
+      - '${DEV_STATS_PORT:-4001}:4001'
+    environment:
+      LOG_LEVEL: debug
+
+  orchestrator:
+    environment:
+      LOG_LEVEL: debug
+      # A short introspection timeout makes a misconfigured dependency obvious
+      # in seconds instead of after the default 1.5 seconds of silence.
+      AUTH_VALIDATE_TIMEOUT_MS: 1500
+
+  mobile-web:
+    environment:
+      LOG_LEVEL: debug

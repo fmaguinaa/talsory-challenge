@@ -90,6 +90,13 @@ export class HttpTokenValidator implements TokenValidator {
       response = await this.fetchImpl(`${this.baseUrl}/auth/validate`, {
         method: 'POST',
         headers: {
+          // The token under inspection. Without this header the authority sees
+          // no credential, answers `{ active: false }`, and every valid token is
+          // reported as invalid -- a failure that looks like an authentication
+          // bug and is not one.
+          authorization: `Bearer ${token}`,
+          // The service credential authorises the introspection *call*; it is a
+          // different secret from the token being inspected.
           'x-service-key': this.serviceKey,
           accept: 'application/json',
         },
