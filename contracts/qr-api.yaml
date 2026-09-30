@@ -1,0 +1,218 @@
+openapi: 3.1.0
+info:
+  title: Interseguro qr-api API
+  version: 1.0.0
+  description: >-
+    Computes the full QR factorization `A (m x n) = Q (m x m) * R (m x n)`
+    using Householder reflections. Implementation is in Go with Fiber.
+    Errors follow RFC 9457 (application/problem+json).
+servers:
+  - url: http://qr-api:8081
+    description: Internal Docker network (not published to the host in default compose)
+
+tags:
+  - name: qr
+  - name: health
+
+paths:
+  /api/v1/qr/factorize:
+    post:
+      tags: [qr]
+      summary: Factorize a matrix into its QR decomposition
+      operationId: factorize
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FactorizeRequest'
+      responses:
+        '200':
+          description: >-
+            Full QR factorization. `Q` is orthogonal (m x m) and `R` is upper
+            triangular (m x n). The sign convention is the LAPACK one: the
+            diagonal of `R` is not normalized to be positive (see ADR-003).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FactorizeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /health/live:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      operationId: healthLive
+      responses:
+        '200':
+          $ref: '#/components/responses/HealthOk'
+
+  /health/ready:
+    get:
+      tags: [health]
+      summary: Readiness probe
+      operationId: healthReady
+      responses:
+        '200':
+          $ref: '#/components/responses/HealthOk'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        The token is validated against auth-service `POST /auth/validate`
+        (defense in depth). auth-service is unreachable => 503, never a pass.
+
+  headers:
+    XRequestId:
+      description: Correlation id, generated when absent and propagated downstream.
+      schema:
+        type: string
+
+  responses:
+    HealthOk:
+      description: Service is ready
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Health'
+    BadRequest:
+      description: Malformed JSON body
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: Missing, malformed, expired or tampered token
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PayloadTooLarge:
+      description: Body exceeds the configured limit
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnprocessableEntity:
+      description: >-
+        Body is valid JSON but the matrix is not (empty, ragged, non-finite,
+        or larger than MAX_MATRIX_DIM). `detail` states the precise reason.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ServiceUnavailable:
+      description: auth-service is unreachable or timed out (fail closed)
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Suggested seconds before retrying.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    Matrix:
+      type: array
+      minItems: 1
+      description: >-
+        A rectangular array of finite numbers. Every row must have the same
+        length >= 1, and no dimension may exceed MAX_MATRIX_DIM (default 100).
+      items:
+        type: array
+        minItems: 1
+        items:
+          type: number
+          format: double
+      example:
+        - [12, -51, 4]
+        - [6, 167, -68]
+        - [-4, 24, -41]
+
+    FactorizeRequest:
+      type: object
+      additionalProperties: false
+      required: [matrix]
+      properties:
+        matrix:
+          $ref: '#/components/schemas/Matrix'
+
+    FactorizeResponse:
+      type: object
+      additionalProperties: false
+      required: [q, r]
+      properties:
+        q:
+          type: array
+          description: Orthogonal factor, m x m, satisfying Q^T * Q = I.
+          items:
+            type: array
+            items:
+              type: number
+              format: double
+        r:
+          type: array
+          description: Upper triangular factor, m x n.
+          items:
+            type: array
+            items:
+              type: number
+              format: double
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details.
+      required: [type, title, status, detail, instance, requestId]
+      properties:
+        type:
+          type: string
+          format: uri
+          example: https://example.com/problems/invalid-matrix
+        title:
+          type: string
+          example: Invalid matrix
+        status:
+          type: integer
+          example: 422
+        detail:
+          type: string
+          example: row 2 has length 2, expected 3
+        instance:
+          type: string
+          example: /api/v1/qr/factorize
+        requestId:
+          type: string

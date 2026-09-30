@@ -1,0 +1,284 @@
+openapi: 3.1.0
+info:
+  title: Interseguro auth-service API
+  version: 1.0.0
+  description: >-
+    Authentication authority. Issues RS256 JWTs, exposes RFC 7662-style token
+    introspection for other backends, and publishes the JWKS for local
+    verification. All errors follow RFC 9457 (application/problem+json).
+servers:
+  - url: http://auth-service:4000
+    description: Internal Docker network (not published to the host in default compose)
+
+tags:
+  - name: auth
+  - name: health
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Exchange credentials for an access token
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Credentials accepted
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Invalid credentials (identical message for unknown user and wrong password)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /auth/validate:
+    post:
+      tags: [auth]
+      summary: Token introspection (RFC 7662-style, service-to-service)
+      description: >-
+        Requires the X-Service-Key header. Callers are other services; the
+        endpoint is never exposed to end users.
+      operationId: validateToken
+      security:
+        - ServiceKey: []
+      parameters:
+        - name: Authorization
+          in: header
+          required: false
+          description: '`Bearer <token>`. May be omitted if the body carries `token`.'
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+                  description: Fallback when the Authorization header is not usable.
+      responses:
+        '200':
+          description: >-
+            Introspection result. `active: true` means the token is valid and
+            unexpired; otherwise only `active: false` is returned.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntrospectionResponse'
+        '401':
+          description: Missing or invalid service credential
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /.well-known/jwks.json:
+    get:
+      tags: [auth]
+      summary: Public keys (JWKS) for local RS256 verification
+      operationId: getJwks
+      responses:
+        '200':
+          description: JSON Web Key Set containing the public half of the signing key
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/JWK'
+
+  /health/live:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      operationId: healthLive
+      responses:
+        '200':
+          description: Process is running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /health/ready:
+    get:
+      tags: [health]
+      summary: Readiness probe
+      operationId: healthReady
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: Service cannot accept traffic
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+components:
+  securitySchemes:
+    ServiceKey:
+      type: apiKey
+      in: header
+      name: X-Service-Key
+
+  headers:
+    XRequestId:
+      description: Correlation id, generated when absent and propagated downstream.
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Malformed request
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    TooManyRequests:
+      description: Rate limit exceeded
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 128
+          example: demo
+        password:
+          type: string
+          minLength: 1
+          maxLength: 256
+          example: demo-password
+
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [accessToken, tokenType, expiresIn]
+      properties:
+        accessToken:
+          type: string
+          description: Compact-serialized RS256 JWT.
+        tokenType:
+          type: string
+          const: Bearer
+        expiresIn:
+          type: integer
+          description: Token lifetime in seconds.
+          example: 900
+
+    IntrospectionResponse:
+      type: object
+      additionalProperties: false
+      required: [active]
+      properties:
+        active:
+          type: boolean
+        sub:
+          type: string
+        scope:
+          type: string
+        iss:
+          type: string
+        aud:
+          type: string
+        exp:
+          type: integer
+          format: int64
+        iat:
+          type: integer
+          format: int64
+
+    JWK:
+      type: object
+      required: [kty, kid, use, alg, n, e]
+      properties:
+        kty:
+          type: string
+          const: RSA
+        kid:
+          type: string
+        use:
+          type: string
+          const: sig
+        alg:
+          type: string
+          const: RS256
+        n:
+          type: string
+        e:
+          type: string
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details.
+      required: [type, title, status, detail, instance, requestId]
+      properties:
+        type:
+          type: string
+          format: uri
+          example: https://example.com/problems/invalid-matrix
+        title:
+          type: string
+          example: Invalid matrix
+        status:
+          type: integer
+          example: 422
+        detail:
+          type: string
+          example: row 2 has length 2, expected 3
+        instance:
+          type: string
+          example: /api/v1/qr/factorize
+        requestId:
+          type: string
+          example: 5f1c2f2e-0a2f-4a3a-9a1a-2b7f9d0c1111

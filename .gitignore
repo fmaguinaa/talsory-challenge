@@ -1,0 +1,39 @@
+# Entorno / secretos
+.env
+.env.local
+*.pem
+*.key
+!.env.example
+
+# Node
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+.npm/
+.eslintcache
+
+# Go
+qr-api/bin/
+*.test
+*.out
+
+# Expo
+.expo/
+.expo-shared/
+apps/mobile/dist/
+apps/mobile/web-build/
+apps/mobile/.expo/
+
+# Testing / tooling
+.playwright/
+coverage-reports/
+
+# OS / editores
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

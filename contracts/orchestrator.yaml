@@ -1,0 +1,372 @@
+openapi: 3.1.0
+info:
+  title: Interseguro orchestrator API
+  version: 1.0.0
+  description: >-
+    Backend-for-frontend and the only surface the Expo app talks to. Owns the
+    workflow: validate the token, call qr-api, feed Q and R to stats-api, and
+    return one aggregated response. Implementation is NestJS.
+    Errors follow RFC 9457 (application/problem+json).
+servers:
+  - url: http://localhost:3000
+    description: Public edge published by docker compose
+
+tags:
+  - name: auth
+  - name: matrix
+  - name: health
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Login proxy (delegates to auth-service)
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Credentials accepted
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+
+  /api/v1/matrix/analyze:
+    post:
+      tags: [matrix]
+      summary: Factorize a matrix and return its QR factorization plus statistics
+      operationId: analyzeMatrix
+      description: >-
+        Orchestrates the workflow. The caller's bearer token is validated
+        against auth-service and then propagated verbatim to qr-api and
+        stats-api, so every service authorizes independently (zero trust).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnalyzeRequest'
+      responses:
+        '200':
+          description: QR factorization and the statistics of Q and R
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyzeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+
+  /health/live:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      operationId: healthLive
+      responses:
+        '200':
+          $ref: '#/components/responses/HealthOk'
+
+  /health/ready:
+    get:
+      tags: [health]
+      summary: Readiness probe
+      operationId: healthReady
+      responses:
+        '200':
+          $ref: '#/components/responses/HealthOk'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  headers:
+    XRequestId:
+      description: Correlation id, generated when absent and propagated downstream.
+      schema:
+        type: string
+
+  responses:
+    HealthOk:
+      description: Service is ready
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Health'
+    BadRequest:
+      description: Malformed JSON body
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: Missing, malformed, expired or tampered token
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PayloadTooLarge:
+      description: Body exceeds the configured limit
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnprocessableEntity:
+      description: >-
+        The matrix is not acceptable. Validation runs before any downstream
+        call, so this never costs a network round trip. When a downstream
+        service rejects the input, its original reason is preserved in `detail`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    TooManyRequests:
+      description: Rate limit exceeded
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    BadGateway:
+      description: A downstream service replied with an error (unreachable contract)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    GatewayTimeout:
+      description: A downstream service did not answer in time
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ServiceUnavailable:
+      description: >-
+        auth-service is unreachable or timed out, so the token could not be
+        validated. Fail closed (ADR-005).
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Suggested seconds before retrying.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 128
+          example: demo
+        password:
+          type: string
+          minLength: 1
+          maxLength: 256
+          example: demo-password
+
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [accessToken, tokenType, expiresIn]
+      properties:
+        accessToken:
+          type: string
+        tokenType:
+          type: string
+          const: Bearer
+        expiresIn:
+          type: integer
+          description: Token lifetime in seconds.
+          example: 900
+
+    Matrix:
+      type: array
+      minItems: 1
+      description: >-
+        Rectangular array of finite numbers, with the same limits as qr-api
+        (no dimension above MAX_MATRIX_DIM, default 100).
+      items:
+        type: array
+        minItems: 1
+        items:
+          type: number
+          format: double
+      example:
+        - [12, -51, 4]
+        - [6, 167, -68]
+        - [-4, 24, -41]
+
+    AnalyzeRequest:
+      type: object
+      additionalProperties: false
+      required: [matrix]
+      properties:
+        matrix:
+          $ref: '#/components/schemas/Matrix'
+
+    AnalyzeResponse:
+      type: object
+      additionalProperties: false
+      required: [requestId, input, qr, stats]
+      properties:
+        requestId:
+          type: string
+          description: Correlation id of this workflow, propagated downstream.
+        input:
+          type: object
+          additionalProperties: false
+          required: [rows, cols]
+          properties:
+            rows:
+              type: integer
+              example: 3
+            cols:
+              type: integer
+              example: 3
+        qr:
+          type: object
+          additionalProperties: false
+          required: [q, r]
+          properties:
+            q:
+              type: array
+              items:
+                type: array
+                items:
+                  type: number
+                  format: double
+            r:
+              type: array
+              items:
+                type: array
+                items:
+                  type: number
+                  format: double
+        stats:
+          type: object
+          additionalProperties: false
+          required: [global, perMatrix]
+          properties:
+            global:
+              type: object
+              additionalProperties: false
+              required: [max, min, average, sum, anyDiagonal]
+              properties:
+                max:
+                  type: number
+                  format: double
+                min:
+                  type: number
+                  format: double
+                average:
+                  type: number
+                  format: double
+                sum:
+                  type: number
+                  format: double
+                anyDiagonal:
+                  type: boolean
+            perMatrix:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [id, max, min, average, sum, isDiagonal]
+                properties:
+                  id:
+                    type: string
+                  max:
+                    type: number
+                    format: double
+                  min:
+                    type: number
+                    format: double
+                  average:
+                    type: number
+                    format: double
+                  sum:
+                    type: number
+                    format: double
+                  isDiagonal:
+                    type: boolean
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details.
+      required: [type, title, status, detail, instance, requestId]
+      properties:
+        type:
+          type: string
+          format: uri
+          example: https://example.com/problems/invalid-matrix
+        title:
+          type: string
+          example: Invalid matrix
+        status:
+          type: integer
+          example: 422
+        detail:
+          type: string
+          example: row 2 has length 2, expected 3
+        instance:
+          type: string
+          example: /api/v1/matrix/analyze
+        requestId:
+          type: string

@@ -1,0 +1,21 @@
+# Linter configuration for qr-api.
+# Kept small and boring on purpose: the default set plus a few checks that
+# actually catch defects in this codebase.
+version: "2"
+
+linters:
+  enable:
+    - bodyclose      # HTTP response bodies must be closed
+    - errorlint      # use errors.Is / errors.As instead of ==
+    - gocritic
+    - misspell
+    - revive
+    - unconvert
+    - gosec          # integer overflows, unsafe blocks, weak randomness
+  exclusions:
+    rules:
+      # Test files legitimately use unhandled errors and long functions.
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck

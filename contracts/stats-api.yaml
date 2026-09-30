@@ -1,0 +1,272 @@
+openapi: 3.1.0
+info:
+  title: Interseguro stats-api API
+  version: 1.0.0
+  description: >-
+    Computes descriptive statistics over any list of labeled matrices:
+    max, min, average and total sum, plus whether any matrix is diagonal.
+    Implementation is in Node.js with Express. Errors follow RFC 9457
+    (application/problem+json).
+servers:
+  - url: http://stats-api:4001
+    description: Internal Docker network (not published to the host in default compose)
+
+tags:
+  - name: stats
+  - name: health
+
+paths:
+  /api/v1/stats:
+    post:
+      tags: [stats]
+      summary: Aggregate statistics over a list of matrices
+      operationId: computeStats
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatsRequest'
+      responses:
+        '200':
+          description: >-
+            `global` aggregates every value of every matrix. `perMatrix` keeps
+            the breakdown for traceability. A matrix counts as diagonal when it
+            is square and every off-diagonal element satisfies |x| <= EPSILON
+            (default 1e-9, see ADR-004); non-square matrices are never diagonal
+            and a 1x1 matrix is.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /health/live:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      operationId: healthLive
+      responses:
+        '200':
+          $ref: '#/components/responses/HealthOk'
+
+  /health/ready:
+    get:
+      tags: [health]
+      summary: Readiness probe
+      operationId: healthReady
+      responses:
+        '200':
+          $ref: '#/components/responses/HealthOk'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        The token is validated against auth-service `POST /auth/validate`
+        (defense in depth). auth-service is unreachable => 503, never a pass.
+
+  headers:
+    XRequestId:
+      description: Correlation id, generated when absent and propagated downstream.
+      schema:
+        type: string
+
+  responses:
+    HealthOk:
+      description: Service is ready
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Health'
+    BadRequest:
+      description: Malformed JSON body
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: Missing, malformed, expired or tampered token
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PayloadTooLarge:
+      description: Body exceeds the configured limit
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnprocessableEntity:
+      description: >-
+        Body is valid JSON but the payload is not acceptable (no matrices, a
+        ragged or empty matrix, non-finite values, limits exceeded).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ServiceUnavailable:
+      description: auth-service is unreachable or timed out (fail closed)
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Suggested seconds before retrying.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    LabeledMatrix:
+      type: object
+      additionalProperties: false
+      required: [id, data]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Label used in `perMatrix` for traceability (e.g. "Q", "R").
+          example: Q
+        data:
+          type: array
+          minItems: 1
+          description: >-
+            Rectangular array of finite numbers. Total elements across all
+            matrices must not exceed MAX_TOTAL_ELEMENTS (default 20000).
+          items:
+            type: array
+            minItems: 1
+            items:
+              type: number
+              format: double
+
+    StatsRequest:
+      type: object
+      additionalProperties: false
+      required: [matrices]
+      properties:
+        matrices:
+          type: array
+          minItems: 1
+          maxItems: 16
+          description: Bounded by MAX_MATRICES (default 16).
+          items:
+            $ref: '#/components/schemas/LabeledMatrix'
+
+    Aggregate:
+      type: object
+      additionalProperties: false
+      required: [max, min, average, sum]
+      properties:
+        max:
+          type: number
+          format: double
+        min:
+          type: number
+          format: double
+        average:
+          type: number
+          format: double
+          description: sum / elementCount, using compensated summation.
+        sum:
+          type: number
+          format: double
+          description: Compensated (Neumaier) sum to avoid accumulation error.
+
+    MatrixStats:
+      type: object
+      additionalProperties: false
+      required: [id, max, min, average, sum, isDiagonal]
+      properties:
+        id:
+          type: string
+        max:
+          type: number
+          format: double
+        min:
+          type: number
+          format: double
+        average:
+          type: number
+          format: double
+        sum:
+          type: number
+          format: double
+        isDiagonal:
+          type: boolean
+
+    StatsResponse:
+      type: object
+      additionalProperties: false
+      required: [global, perMatrix]
+      properties:
+        global:
+          allOf:
+            - $ref: '#/components/schemas/Aggregate'
+            - type: object
+              required: [anyDiagonal]
+              properties:
+                anyDiagonal:
+                  type: boolean
+                  description: True when at least one input matrix is diagonal.
+        perMatrix:
+          type: array
+          items:
+            $ref: '#/components/schemas/MatrixStats'
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details.
+      required: [type, title, status, detail, instance, requestId]
+      properties:
+        type:
+          type: string
+          format: uri
+          example: https://example.com/problems/invalid-matrix
+        title:
+          type: string
+          example: Invalid matrix
+        status:
+          type: integer
+          example: 422
+        detail:
+          type: string
+          example: matrix "Q" row 2 has length 2, expected 3
+        instance:
+          type: string
+          example: /api/v1/stats
+        requestId:
+          type: string
