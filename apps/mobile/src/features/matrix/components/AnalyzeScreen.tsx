@@ -25,7 +25,7 @@ import {
  * than a 422 that arrives a second later.
  */
 export default function AnalyzeScreen(): React.ReactElement {
-  const { logout } = useAuth();
+  const { accessToken, logout } = useAuth();
 
   const [draft, setDraft] = useState<DraftMatrix>(() => emptyDraft(3, 3));
   const [validationError, setValidationError] = useState<MatrixValidationError | undefined>();
@@ -52,7 +52,7 @@ export default function AnalyzeScreen(): React.ReactElement {
 
     setBusy(true);
     try {
-      const response = await analyze(validated.matrix);
+      const response = await analyze(validated.matrix, { token: accessToken ?? undefined });
       setResult(response);
     } catch (caught) {
       if (caught instanceof ApiError) {
@@ -67,7 +67,7 @@ export default function AnalyzeScreen(): React.ReactElement {
     } finally {
       setBusy(false);
     }
-  }, [draft, logout]);
+  }, [accessToken, draft, logout]);
 
   /** Whether the Analyze button should be enabled. */
   const canAnalyze = useMemo(() => !busy, [busy]);

@@ -43,3 +43,6 @@ Thumbs.db
 
 # Generado por `expo export`
 apps/mobile/dist/
+
+# graphify-axet
+.graphify/

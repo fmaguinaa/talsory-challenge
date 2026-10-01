@@ -16,6 +16,16 @@ import { createTokenStore, type TokenStore } from './services/tokenStore';
 export interface AuthState {
   /** Whether a usable token is held. */
   readonly isAuthenticated: boolean;
+  /**
+   * The current access token, or null when signed out.
+   *
+   * Exposed so screens can authorise their calls: the API client takes the
+   * token as an explicit argument instead of reaching into a store, which keeps
+   * it a pure function of its arguments -- but it means a caller that forgets it
+   * sends an unauthenticated request and gets a 401. Any screen that calls a
+   * protected endpoint must pass this.
+   */
+  readonly accessToken: string | null;
   /** Whether the stored token is still being read at startup. */
   readonly isRestoring: boolean;
   /** Seconds until the current token expires, when known. */
@@ -88,6 +98,7 @@ export function AuthProvider({
     const secondsLeft = expiresAt === null ? null : Math.max(0, Math.round((expiresAt - now()) / 1000));
     return {
       isAuthenticated: token !== null,
+      accessToken: token,
       isRestoring,
       expiresInSeconds: secondsLeft,
       login,
