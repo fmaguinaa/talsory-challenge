@@ -2,6 +2,13 @@
 
 Infraestructura como código con **Bicep** para **Azure Container Apps**.
 
+> **Hay un segundo despliegue en este directorio:** [`render/`](render/README.md)
+> publica una demostración a coste cero en Render. Es un objetivo distinto (que
+> el ejercicio sea visible sin pagar) con consecuencias distintas, y está
+> documentado aparte en
+> [ADR-009](../docs/adr/009-despliegue-demo-render.md). ACA sigue siendo el
+> objetivo de nube del reto.
+
 > **Estado de esta infraestructura: validada pero NO ejecutada.**
 > `deploy/main.bicep` compila sin errores ni advertencias con `bicep build` y el
 > ARM generado ha sido revisado, pero nunca se ha aplicado contra una suscripción

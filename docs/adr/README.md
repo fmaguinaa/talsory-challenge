@@ -17,6 +17,7 @@ idioma estándar del ecosistema.
 | [006](006-no-database.md) | Sin base de datos |
 | [007](007-token-storage-mobile.md) | Almacenamiento de tokens en Expo |
 | [008](008-cloud-target-and-deployment-strategy.md) | Objetivo de nube y estrategia de despliegue |
+| [009](009-despliegue-demo-render.md) | Despliegue de demostración en Render |
 
 ## Plantilla
 

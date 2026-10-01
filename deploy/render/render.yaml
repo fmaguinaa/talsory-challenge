@@ -1,0 +1,235 @@
+# Blueprint de Render para el despliegue de demostración.
+#
+# NO contiene ningún secreto: las variables marcadas con `sync: false` se piden
+# en el panel de Render la primera vez que se sincroniza el blueprint. La clave
+# de servicio se genera sola (`generateValue: true`) y se comparte por
+# referencia, de modo que los cuatro backends presentan exactamente el mismo
+# valor. Ver deploy/render/README.md para el porqué de cada decisión.
+
+services:
+  # ---------------------------------------------------------------------------
+  # auth-service: emite e introspecta los tokens.
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: talsory-auth
+    runtime: docker
+    dockerContext: ./services/auth-service
+    dockerfilePath: ./services/auth-service/Dockerfile
+    plan: free
+    region: oregon
+    healthCheckPath: /health/ready
+    autoDeployTrigger: checksPass
+    buildFilter:
+      paths:
+        - services/auth-service/**
+        - render.yaml
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      # Render inyecta PORT=10000; el servicio lee su propio nombre de variable,
+      # así que se le da el mismo valor. Cada servicio es un contenedor distinto,
+      # así que todos pueden escuchar en el mismo puerto sin colisionar.
+      - key: AUTH_PORT
+        value: '10000'
+      # Única fuente de la credencial de servicio. Los otros tres la referencian
+      # con `fromService` en lugar de volver a generarla: dos valores distintos
+      # romperían la introspección sin que ningún error lo explicara.
+      - key: SERVICE_API_KEYS
+        generateValue: true
+      - key: JWT_PRIVATE_KEY_PEM
+        sync: false
+      - key: JWT_PUBLIC_KEY_PEM
+        sync: false
+      - key: JWT_KID
+        sync: false
+      - key: JWT_TTL_SECONDS
+        value: '900'
+      - key: JWT_ISSUER
+        value: https://interseguro.local/auth
+      - key: JWT_AUDIENCE
+        value: interseguro-api
+      - key: DEMO_USERNAME
+        value: demo
+      - key: DEMO_PASSWORD_HASH
+        sync: false
+
+  # ---------------------------------------------------------------------------
+  # qr-api: factorización QR (Go + Fiber).
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: talsory-qr
+    runtime: docker
+    dockerContext: ./services/qr-api
+    dockerfilePath: ./services/qr-api/Dockerfile
+    plan: free
+    region: oregon
+    healthCheckPath: /health/ready
+    autoDeployTrigger: checksPass
+    buildFilter:
+      paths:
+        - services/qr-api/**
+        - render.yaml
+    envVars:
+      - key: LOG_LEVEL
+        value: info
+      - key: QR_ADDR
+        value: 0.0.0.0:10000
+      - key: MAX_MATRIX_DIM
+        value: '100'
+      - key: QR_MAX_BODY_BYTES
+        value: '1048576'
+      - key: AUTH_SERVICE_URL
+        value: https://talsory-auth.onrender.com
+      - key: AUTH_SERVICE_KEY
+        fromService:
+          name: talsory-auth
+          type: web
+          envVarKey: SERVICE_API_KEYS
+      - key: AUTH_CACHE_TTL_SECONDS
+        value: '30'
+      # Ver "El problema del arranque en frío" en el README: en el plan free cada
+      # servicio se duerme a los 15 minutos y tarda ~1 minuto en despertar. El
+      # valor por defecto de 1500 ms convertiría ese despertar en un 503.
+      - key: AUTH_VALIDATE_TIMEOUT_MS
+        value: '90000'
+
+  # ---------------------------------------------------------------------------
+  # stats-api: estadísticas sobre matrices (Node + Express).
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: talsory-stats
+    runtime: docker
+    dockerContext: ./services/stats-api
+    dockerfilePath: ./services/stats-api/Dockerfile
+    plan: free
+    region: oregon
+    healthCheckPath: /health/ready
+    autoDeployTrigger: checksPass
+    buildFilter:
+      paths:
+        - services/stats-api/**
+        - render.yaml
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: STATS_PORT
+        value: '10000'
+      - key: MAX_MATRICES
+        value: '16'
+      - key: MAX_TOTAL_ELEMENTS
+        value: '20000'
+      - key: MAX_MATRIX_DIM
+        value: '100'
+      - key: STATS_MAX_BODY_BYTES
+        value: '1048576'
+      - key: DIAGONAL_EPSILON
+        value: 1e-9
+      - key: AUTH_SERVICE_URL
+        value: https://talsory-auth.onrender.com
+      - key: AUTH_SERVICE_KEY
+        fromService:
+          name: talsory-auth
+          type: web
+          envVarKey: SERVICE_API_KEYS
+      - key: AUTH_CACHE_TTL_SECONDS
+        value: '30'
+      - key: AUTH_VALIDATE_TIMEOUT_MS
+        value: '90000'
+
+  # ---------------------------------------------------------------------------
+  # orchestrator: única API pública. Orquesta el flujo completo.
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: talsory-orchestrator
+    runtime: docker
+    dockerContext: ./services/orchestrator
+    dockerfilePath: ./services/orchestrator/Dockerfile
+    plan: free
+    region: oregon
+    healthCheckPath: /health/ready
+    autoDeployTrigger: checksPass
+    buildFilter:
+      paths:
+        - services/orchestrator/**
+        - render.yaml
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      # Render ya inyecta PORT=10000; se deja explícito para que el YAML no
+      # dependa de un valor por defecto de la plataforma.
+      - key: PORT
+        value: '10000'
+      - key: AUTH_SERVICE_URL
+        value: https://talsory-auth.onrender.com
+      - key: QR_API_URL
+        value: https://talsory-qr.onrender.com
+      - key: STATS_API_URL
+        value: https://talsory-stats.onrender.com
+      - key: AUTH_SERVICE_KEY
+        fromService:
+          name: talsory-auth
+          type: web
+          envVarKey: SERVICE_API_KEYS
+      # Hay que volver a desplegar con la URL real del front cuando se añada un
+      # dominio propio; ver "CORS y el ciclo de dependencias" en el README.
+      - key: CORS_ORIGINS
+        value: https://talsory-web.onrender.com
+      - key: MAX_MATRIX_DIM
+        value: '100'
+      - key: MAX_BODY_BYTES
+        value: '1048576'
+      # 3 s es lo correcto en local, donde qr-api y stats-api ya están
+      # despiertos. Aquí ambos pueden estar dormidos: sin subir este valor la
+      # primera petición de cada visita devolvería 504 en vez de funcionar.
+      - key: DOWNSTREAM_TIMEOUT_MS
+        value: '90000'
+      - key: DOWNSTREAM_RETRIES
+        value: '1'
+      - key: DOWNSTREAM_RETRY_BACKOFF_MS
+        value: '100'
+      - key: AUTH_VALIDATE_TIMEOUT_MS
+        value: '90000'
+      - key: THROTTLE_TTL_MS
+        value: '60000'
+      - key: THROTTLE_LIMIT
+        value: '120'
+
+  # ---------------------------------------------------------------------------
+  # Front web (export de Expo) servido como sitio estático sobre CDN.
+  # Un sitio estático no se duerme: es lo primero que ve el recruitment team.
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: talsory-web
+    runtime: static
+    # Sin `region`: los sitios estáticos se sirven desde una CDN global y la
+    # plataforma rechaza la propiedad explícitamente.
+    buildCommand: >-
+      cd apps/mobile && npm ci && npx expo export --platform web
+    staticPublishPath: ./apps/mobile/dist
+    autoDeployTrigger: checksPass
+    buildFilter:
+      paths:
+        - apps/mobile/**
+        - render.yaml
+    envVars:
+      # Gana sobre /config.json en tiempo de ejecución (ver
+      # apps/mobile/src/config/runtimeConfig.ts). En un sitio estático el build
+      # ocurre en cada despliegue, así que no hay nada que ganar resolviéndolo
+      # en el arranque del contenedor.
+      - key: EXPO_PUBLIC_API_URL
+        value: https://talsory-orchestrator.onrender.com
+    routes:
+      # El front es una SPA: cualquier ruta desconocida devuelve index.html.
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable

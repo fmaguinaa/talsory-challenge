@@ -86,3 +86,11 @@ eso:
   concretos; hoy está el rol sobre el registro pero no sobre el vault.
 - **La plantilla nunca se ha aplicado.** Es lo más importante que queda por
   verificar, y está dicho en `deploy/README.md` y aquí.
+
+## Añadidos posterior
+
+Esta decisión no se revisa, pero se le ha añadido un despliegue que no la
+contradice: `deploy/render/` publica una demostración a coste cero en Render, con
+un objetivo distinto (que el ejercicio sea visible sin pagar ni dar de alta una
+tarjeta) y consecuencias distintas, en particular la pérdida de la red privada en
+el plan gratuito. Ver [ADR-009](009-despliegue-demo-render.md).
