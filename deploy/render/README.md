@@ -88,12 +88,12 @@ se revisó.
 
    ```bash
    ./scripts/gen-dev-keys.sh
-   cat .env.dev-keys
+   ./scripts/render-secrets.sh
    ```
 
-   Del fichero se necesitan cuatro valores: `JWT_PRIVATE_KEY_PEM`,
-   `JWT_PUBLIC_KEY_PEM`, `JWT_KID` y `DEMO_PASSWORD_HASH`. El PEM se pega en
-   Render **con los `\n` escapados**, tal cual los escribe el script.
+   El segundo comando imprime los cuatro valores ya listos para pegar en el
+   panel, junto con el porqué de **no** pegarlos directamente desde
+   `.env.dev-keys` (sección 5.2).
 3. Desactivar "Allow unlisted public repositories" si el repo es privado; con
    repo público no hace falta.
 
@@ -147,11 +147,14 @@ de no pagar.
 
 ## 5. Despliegue
 
-### 5.1 Crear el blueprint
+### 5.0 Se crea con un Blueprint, no con cinco servicios a mano
 
-En el panel de Render: **New → Blueprint**, conectar `fmaguinaa/talsory-challenge`,
-indicar la ruta del blueprint **`deploy/render/render.yaml`** (no está en la raíz
-del repo, para mantener la convención de que la IaC vive en `deploy/`).
+Render ofrece dos caminos y aquí sólo sirve uno:
+
+| Camino | ¿Sirve? |
+|---|---|
+| Crear un "Web Service" → Dockerfile → repetir cinco veces | **No.** Habría que escribir a mano el directorio de cada uno, el contexto de build, las variables y las URLs cruzadas, y nada quedaría en el repositorio. Además las URLs no se conocen hasta que existen: cada servicio necesita la URL de los otros, y ese problema se repite cinco veces. |
+| **New → Blueprint**, indicando `render.yaml` | **Sí.** Un solo fichero declara los cinco servicios, sus entornos y cómo se referencian entre sí. Es IaC versionada y revisable en un pull request. |
 
 Los subdominios se pueden conocer **antes** del primer despliegue: Render deriva
 la URL del `name` del servicio. De ahí los nombres `talsory-*` del blueprint y las
@@ -159,18 +162,59 @@ URLs fijadas en `QR_API_URL`, `STATS_API_URL` y `CORS_ORIGINS`. Si alguno ya
 estuviera ocupado, Render añadirá un sufijo y habrá que corregir esas tres
 variables.
 
+### 5.1 Crear el blueprint
+
+1. Sube el código a GitHub primero (`git push -u origin master`). Render
+   despliega desde el repositorio, no desde el disco local.
+2. En <https://dashboard.render.com>: **New → Blueprint**.
+3. **Connect repository** → elige `fmaguinaa/talsory-challenge`.
+4. En **Blueprint Path** escribe `deploy/render/render.yaml`.
+   **No está en la raíz del repo** a propósito: la convención del proyecto es que
+   la IaC viva en `deploy/`. Si Render no encuentra el fichero, es esto.
+5. Pulsa **Apply**. En el valor de *Region* acepta `Oregon`.
+
+Aparecen los cinco servicios y Render pide los valores marcados `sync: false`.
+Pégalos desde `./scripts/render-secrets.sh` (sección 5.2) y continúa.
+
+Lo que verás después, con cada servicio en `Free`:
+
+| Servicio | URL |
+|---|---|
+| front | `https://talsory-web.onrender.com` |
+| orquestador | `https://talsory-orchestrator.onrender.com` |
+| auth | `https://talsory-auth.onrender.com` |
+| qr | `https://talsory-qr.onrender.com` |
+| stats | `https://talsory-stats.onrender.com` |
+
+Los cuatro web service tardan varios minutos en el **primer** despliegue: compilan
+la imagen en la nube. El sitio estático es más rápido.
+
 ### 5.2 Secretos
 
 El blueprint marca cuatro variables con `sync: false`. Render las pide en el
 panel la primera vez que sincroniza; después quedan guardadas en el workspace y
-no se vuelven a mostrar.
+no se vuelven a mostrar. Para obtenerlas:
 
+```bash
+./scripts/render-secrets.sh
 ```
-JWT_PRIVATE_KEY_PEM    -> contenido de .env.dev-keys, con \n escapados
-JWT_PUBLIC_KEY_PEM     -> ídem
-JWT_KID                -> ídem
-DEMO_PASSWORD_HASH     -> ídem
-```
+
+**No las copies a mano desde `.env.dev-keys`.** Ese fichero está escrito para
+docker compose, que interpola `$` incluso en los valores de `env_file`, así que
+el hash sale con los dólares duplicados (`$$argon2id$...`). Render no interpola
+nada, y el resultado falla de dos maneras:
+
+- `auth-service` comprueba `startsWith('$argon2')` y **se niega a arrancar** con
+  *"DEMO_PASSWORD_HASH must be an argon2id hash"*, un error que no señala su
+  causa real.
+- Si esa comprobación se saltara, `argon2` rechaza la cadena y
+  `Argon2PasswordPort.verify` convierte la excepción en `false`: el login
+  fallaría siempre, en silencio y sin log.
+
+`render-secrets.sh` deshace ese escape y avisa antes de que llegues a Render con
+un valor que no va a funcionar. Los dos PEM sí se pegan tal cual: ya son una
+única línea con `\n` escapados, que es justo lo que Render espera, y
+`normalizePem` los convierte de vuelta en saltos de línea reales.
 
 La credencial de servicio **no** se introduce a mano: `SERVICE_API_KEYS` se
 genera sola en `auth-service` (`generateValue: true`) y los otros tres la
